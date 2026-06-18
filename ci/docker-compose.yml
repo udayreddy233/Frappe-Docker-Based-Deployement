@@ -1,0 +1,347 @@
+services:
+  volume-init:
+    image: busybox:latest
+    command: ["sh", "-c", "echo 'Volumes ready!'"]
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+      - assets:/home/frappe/frappe-bench/sites/assets
+      - apps:/home/frappe/frappe-bench/apps
+      - env:/home/frappe/frappe-bench/env
+      - config:/home/frappe/frappe-bench/config
+    networks:
+      - frappe_network
+    deploy:
+      restart_policy:
+        condition: none
+
+  backend:
+    image: $DEPLOYMENT_NAME:$CI_COMMIT_SHA
+    networks:
+      - frappe_network
+    restart: always
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+      - assets:/home/frappe/frappe-bench/sites/assets
+      - apps:/home/frappe/frappe-bench/apps
+      - env:/home/frappe/frappe-bench/env
+      - config:/home/frappe/frappe-bench/config
+    environment:
+      DB_HOST: $DB_HOST
+      DB_PORT: $DB_PORT
+      SITE_NAME: ${SITE_NAME}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    command:
+      - bash
+      - -c
+      - >
+        pwd;
+        ( bench use $SITE_NAME;
+        cd apps/frappe;
+        git pull;
+        cd ../survey_v2;
+        git pull;
+        cd ../erpnext;
+        git pull;
+        cd ../commit;
+        git pull;
+        cd ../dfp_external_storage;
+        git pull;
+        cd ../frappe_s3_attachment;
+        git pull;
+        cd ../india_compliance;
+        git pull;
+        echo "Migration Start";
+        bench --site $SITE_NAME migrate;
+        echo "Migration Complete"
+        bench build --production && env PYTHONPATH=/home/frappe/frappe-bench/apps /home/frappe/frappe-bench/env/bin/gunicorn --chdir=/home/frappe/frappe-bench/sites --bind=0.0.0.0:8000 --threads=4 --workers=5 --worker-class=gthread --worker-tmp-dir=/dev/shm --timeout=120 --preload frappe.app:application ) > >(tee -a /home/frappe/frappe-bench/logs/gunicorn.log) 2>&1
+    depends_on:
+      redis-cache:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
+      create-site:
+        condition: service_completed_successfully
+      volume-init:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    extra_hosts:
+        localhost: 172.17.0.1
+
+
+  configurator:
+    image: $DEPLOYMENT_NAME:$CI_COMMIT_SHA
+    networks:
+      - frappe_network
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      redis-cache:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
+    deploy:
+      restart_policy:
+        condition: none
+    entrypoint:
+      - bash
+      - -c
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host $$DB_HOST;
+        bench set-config -gp db_port $$DB_PORT;
+        bench set-config -g redis_cache "redis://$$REDIS_CACHE";
+        bench set-config -g redis_queue "redis://$$REDIS_QUEUE";
+        bench set-config -g redis_socketio "redis://$$REDIS_SOCKETIO";
+        bench set-config -gp socketio_port $$SOCKETIO_PORT;
+        bench set-config -g developer_mode 1;
+        bench set-config -g server_script_enabled 1;
+        echo "bench configured";
+    environment:
+      DB_HOST: $DB_HOST
+      DB_PORT: $DB_PORT
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      REDIS_SOCKETIO: redis-cache:6379
+      SOCKETIO_PORT: "9000"
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+      - apps:/home/frappe/frappe-bench/apps
+      - env:/home/frappe/frappe-bench/env
+      - config:/home/frappe/frappe-bench/config
+
+  create-site:
+    image: $DEPLOYMENT_NAME:$CI_COMMIT_SHA
+    networks:
+      - frappe_network
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      configurator:
+        condition: service_completed_successfully
+    deploy:
+      restart_policy:
+        condition: none
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+      - assets:/home/frappe/frappe-bench/sites/assets
+      - apps:/home/frappe/frappe-bench/apps
+      - env:/home/frappe/frappe-bench/env
+      - config:/home/frappe/frappe-bench/config
+    entrypoint:
+      - bash
+      - -c
+    environment:
+      SITE_NAME: ${SITE_NAME}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      DB_ROOT_USERNAME: ${DB_ROOT_USERNAME}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      GIS_USER: ${GIS_USER}
+      GIS_PASSWORD: ${GIS_PASSWORD}
+      GIS_BASE_URL: ${GIS_BASE_URL}
+    command: 
+      - >
+        ( export start=$(date +%s);
+        until [[ -n $(grep -hs ^ sites/common_site_config.json | jq -r ".db_host // empty") ]] && 
+              [[ -n $(grep -hs ^ sites/common_site_config.json | jq -r ".redis_cache // empty") ]] && 
+              [[ -n $(grep -hs ^ sites/common_site_config.json | jq -r ".redis_queue // empty") ]]; 
+        do 
+           sleep 5;
+        done;
+        bench new-site $SITE_NAME --db-host="$DB_HOST" --db-type="postgres" --admin-password="$ADMIN_PASSWORD" --db-root-password="$DB_ROOT_PASSWORD" --db-user="$DB_USER" --db-name="$DB_NAME" --db-password="$DB_PASSWORD";
+        echo "Site Created Successfully";
+        bench --site $SITE_NAME set-config gis_user $GIS_USER;
+        bench --site $SITE_NAME set-config gis_password $GIS_PASSWORD;
+        bench --site $SITE_NAME set-config gis_end_url $GIS_BASE_URL;
+        bench --site $SITE_NAME install-app survey_v2;
+        bench --site $SITE_NAME install-app commit;
+        bench --site $SITE_NAME install-app dfp_external_storage;
+        bench --site $SITE_NAME install-app frappe_s3_attachment;
+        bench --site $SITE_NAME install-app india_compliance;
+        bench --site $SITE_NAME install-app erpnext;
+        echo "Apps Installed Successfully"; ) > >(tee -a /home/frappe/frappe-bench/logs/create-site.log) 2>&1
+
+ 
+  frontend:
+    image: $DEPLOYMENT_NAME:$CI_COMMIT_SHA
+    pull_policy: never
+    networks:
+      - frappe_network
+    depends_on:
+      websocket:
+        condition: service_started
+      create-site:
+        condition: service_completed_successfully
+      volume-init:
+        condition: service_completed_successfully
+      backend: 
+        condition: service_started
+    restart: always
+    command:
+      - nginx-entrypoint.sh
+    environment:
+      BACKEND: backend:8000
+      FRAPPE_SITE_NAME_HEADER: $SITE_NAME
+      SOCKETIO: websocket:9000
+      UPSTREAM_REAL_IP_ADDRESS: $SSH_KNOWN_HOSTS
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      PROXY_READ_TIMEOUT: 120
+      CLIENT_MAX_BODY_SIZE: 50m
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+      - assets:/home/frappe/frappe-bench/sites/assets
+      - apps:/home/frappe/frappe-bench/apps
+      - env:/home/frappe/frappe-bench/env
+      - config:/home/frappe/frappe-bench/config
+    ports:
+      - "8080:8080"
+
+  queue-long:
+    image: $DEPLOYMENT_NAME:$CI_COMMIT_SHA
+    networks:
+      - frappe_network
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      backend:
+        condition: service_started
+    restart: always
+    command:
+      - bench
+      - worker
+      - --queue
+      - long,default,short
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+      - assets:/home/frappe/frappe-bench/sites/assets
+      - apps:/home/frappe/frappe-bench/apps
+      - env:/home/frappe/frappe-bench/env
+      - config:/home/frappe/frappe-bench/config
+
+  queue-short:
+    image: $DEPLOYMENT_NAME:$CI_COMMIT_SHA
+    networks:
+      - frappe_network
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      backend:
+        condition: service_started
+    restart: always
+    command:
+      - bench
+      - worker
+      - --queue
+      - short,default
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+      - assets:/home/frappe/frappe-bench/sites/assets
+      - apps:/home/frappe/frappe-bench/apps
+      - env:/home/frappe/frappe-bench/env
+      - config:/home/frappe/frappe-bench/config
+
+  scheduler:
+    image: $DEPLOYMENT_NAME:$CI_COMMIT_SHA
+    networks:
+      - frappe_network
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      backend:
+        condition: service_started
+    restart: always
+    command:
+      - bench
+      - schedule
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+      - assets:/home/frappe/frappe-bench/sites/assets
+      - apps:/home/frappe/frappe-bench/apps
+      - env:/home/frappe/frappe-bench/env
+      - config:/home/frappe/frappe-bench/config
+
+  websocket:
+    image: $DEPLOYMENT_NAME:$CI_COMMIT_SHA
+    networks:
+      - frappe_network
+    restart: always
+    command:
+      - node
+      - /home/frappe/frappe-bench/apps/frappe/socketio.js
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+      - assets:/home/frappe/frappe-bench/sites/assets
+      - apps:/home/frappe/frappe-bench/apps
+      - env:/home/frappe/frappe-bench/env
+      - config:/home/frappe/frappe-bench/config
+    ports:
+      - "9000:9000"
+
+
+  redis-cache:
+    image: redis:6.2-alpine
+    networks:
+      - frappe_network
+    restart: always
+    volumes:
+      - logs:/home/frappe/frappe-bench/logs
+    ports:
+      - "13000:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: sh -c "redis-server --loglevel verbose | tee -a /home/frappe/frappe-bench/logs/redis-cache.log"
+  
+  redis-queue:
+    image: redis:6.2-alpine
+    networks:
+      - frappe_network
+    restart: always
+    volumes:
+      - logs:/home/frappe/frappe-bench/logs
+    ports:
+      - "11000:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: sh -c "redis-server --loglevel verbose | tee -a /home/frappe/frappe-bench/logs/redis-queue.log"
+
+
+volumes:
+  sites:
+  config:
+  assets:
+  logs:
+  ssh:
+  apps:
+  env:
+  assets:
+
+networks:
+  frappe_network:
+    driver: bridge
+    name: frappe_network

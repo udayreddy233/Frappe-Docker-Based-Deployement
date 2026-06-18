@@ -1,0 +1,12 @@
+#This file is for reference only. APPS have been added to CICD Vars
+
+[
+    {
+      "url": "https://gitlab.pixelvide.com/asakta/whitelabel.git",
+      "branch": "main"
+    },
+    {
+      "url": "https://gitlab.pixelvide.com/smart-meter/frappe_s3_attachment.git",
+      "branch": "main"
+    }
+]
