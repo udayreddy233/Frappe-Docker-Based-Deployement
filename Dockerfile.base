@@ -1,25 +1,19 @@
-FROM python:3.10.12-slim-bookworm
+FROM python:3.12.3-slim-bookworm AS base
+
+COPY ci/nginx-template.conf /templates/nginx/frappe.conf.template
+COPY ci/nginx-entrypoint.sh /usr/local/bin/nginx-entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/nginx-entrypoint.sh
+RUN sed -i 's/\r$//' /templates/nginx/frappe.conf.template
 
 ARG WKHTMLTOPDF_VERSION=0.12.6.1-3
 ARG WKHTMLTOPDF_DISTRO=bookworm
-ARG NODE_VERSION=20.19.0
-
+ARG NODE_VERSION
+ARG APPS
 ENV NVM_DIR=/home/frappe/.nvm
 ENV PATH=${NVM_DIR}/versions/node/v${NODE_VERSION}/bin/:${PATH}
-
 RUN useradd -ms /bin/bash frappe \
     && apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -qqy tzdata gpg wget \
-    && apt-get purge -y --auto-remove 'postgresql*' || true \
-    && wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] http://apt.postgresql.org/pub/repos/apt/ bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
-    && apt-get update \
-    && apt-get install --no-install-recommends -y postgresql-client-16 \
-    && rm -f /usr/bin/psql /usr/bin/pg_config \
-    && ln -s /usr/lib/postgresql/16/bin/psql /usr/bin/psql \
-    && ln -s /usr/lib/postgresql/16/bin/pg_config /usr/bin/pg_config \
-    && psql --version | grep -q "16\." || { echo "PostgreSQL 16 not active"; exit 1; } \
-    && pg_config --version | grep -q "16\." || { echo "pg_config not 16"; exit 1; } \
+    && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -qqy tzdata \
     && ln -fs /usr/share/zoneinfo/Asia/Calcutta /etc/localtime \
     && dpkg-reconfigure -f noninteractive tzdata \
     && pip install wheel -q \
@@ -28,28 +22,143 @@ RUN useradd -ms /bin/bash frappe \
     && pip install botocore \
     && pip install --upgrade setuptools pip -q \
     && apt-get install --no-install-recommends -qqy \
-        curl git vim nginx gettext-base file \
-        libpango-1.0-0 libharfbuzz0b libpangoft2-1.0-0 \
-        libpangocairo-1.0-0 restic gpg less \
-        wait-for-it jq \
+    curl \
+    git \
+    vim \
+    nginx \
+    gettext-base \
+    file \
+    # weasyprint dependencies
+    libpango-1.0-0 \
+    libharfbuzz0b \
+    libpangoft2-1.0-0 \
+    libpangocairo-1.0-0 \
+    # For backups
+    restic \
+    gpg \
+    less \
+    # Postgres
+    libpq-dev \
+    mariadb-client \
+    postgresql-client \
+    # For healthcheck
+    wait-for-it \
+    jq \
+    # NodeJS
     && mkdir -p ${NVM_DIR} \
-    && chown -R frappe:frappe /home/frappe \
-    && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash \
-    && bash -c ". $NVM_DIR/nvm.sh \
-        && nvm install ${NODE_VERSION} \
-        && nvm use ${NODE_VERSION} \
-        && npm install -g yarn \
-        && nvm alias default ${NODE_VERSION}" \
+    && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.5/install.sh | bash \
+    && . ${NVM_DIR}/nvm.sh \
+    && nvm install ${NODE_VERSION} \
+    && nvm use v${NODE_VERSION} \
+    && npm install -g yarn \
+    && nvm alias default v${NODE_VERSION} \
     && rm -rf ${NVM_DIR}/.cache \
-    && if [ \"$(uname -m)\" = \"aarch64\" ]; then export ARCH=arm64; fi \
-    && if [ \"$(uname -m)\" = \"x86_64\" ]; then export ARCH=amd64; fi \
+    && echo 'export NVM_DIR="/home/frappe/.nvm"' >>/home/frappe/.bashrc \
+    && echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm' >>/home/frappe/.bashrc \
+    && echo '[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion' >>/home/frappe/.bashrc \
+    # Install wkhtmltopdf with patched qt
+    && if [ "$(uname -m)" = "aarch64" ]; then export ARCH=arm64; fi \
+    && if [ "$(uname -m)" = "x86_64" ]; then export ARCH=amd64; fi \
     && downloaded_file=wkhtmltox_${WKHTMLTOPDF_VERSION}.${WKHTMLTOPDF_DISTRO}_${ARCH}.deb \
-    && curl -sLO https://github.com/wkhtmltopdf/packaging/releases/download/${WKHTMLTOPDF_VERSION}/${downloaded_file} \
-    && apt-get install -y ./${downloaded_file} \
-    && rm ${downloaded_file} \
-    && pip3 install frappe-bench --break-system-packages \
+    && curl -sLO https://github.com/wkhtmltopdf/packaging/releases/download/$WKHTMLTOPDF_VERSION/$downloaded_file \
+    && apt-get install -y ./$downloaded_file \
+    && rm $downloaded_file \
+    # Clean up
     && rm -rf /var/lib/apt/lists/* \
-    && rm -fr /etc/nginx/sites-enabled/default
+    && rm -fr /etc/nginx/sites-enabled/default \
+    && pip3 install frappe-bench \
+    # Fixes for non-root nginx and logs to stdout
+    && sed -i '/user www-data/d' /etc/nginx/nginx.conf \
+    && ln -sf /dev/stdout /var/log/nginx/access.log && ln -sf /dev/stderr /var/log/nginx/error.log \
+    && touch /run/nginx.pid \
+    && chown -R frappe:frappe /etc/nginx/conf.d \
+    && chown -R frappe:frappe /etc/nginx/nginx.conf \
+    && chown -R frappe:frappe /var/log/nginx \
+    && chown -R frappe:frappe /var/lib/nginx \
+    && chown -R frappe:frappe /run/nginx.pid \
+    && chmod 755 /usr/local/bin/nginx-entrypoint.sh \
+    && chmod 644 /templates/nginx/frappe.conf.template
+
+FROM base AS builder
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
+    # For frappe framework
+    wget \
+    #for building arm64 binaries
+    libcairo2-dev \
+    libpango1.0-dev \
+    libmariadb-dev \
+    libjpeg-dev \
+    libgif-dev \
+    librsvg2-dev \
+    # For psycopg2
+    libpq-dev \
+    # Other
+    libffi-dev \
+    liblcms2-dev \
+    libldap2-dev \
+    libsasl2-dev \
+    libtiff5-dev \
+    libwebp-dev \
+    redis-tools \
+    rlwrap \
+    tk8.6-dev \
+    cron \
+    # For pandas
+    gcc \
+    build-essential \
+    libbz2-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# apps.json includes
+RUN mkdir /opt/frappe && touch /opt/frappe/apps.json  && echo $APPS | base64 -d > /opt/frappe/apps.json
 
 USER frappe
-WORKDIR /home/frappe
+
+ARG FRAPPE_BRANCH
+ARG FRAPPE_PATH
+RUN bench init --apps_path=/opt/frappe/apps.json \
+      --frappe-branch=${FRAPPE_BRANCH} \
+      --frappe-path=${FRAPPE_PATH} \
+      --no-procfile \
+      --no-backups \
+      --skip-redis-config-generation \
+    /home/frappe/frappe-bench && \
+  cd /home/frappe/frappe-bench && \
+  cat sites/common_site_config.json && \
+  bench pip install captcha==0.7.1 && \
+  bench pip install python-dotenv && \
+  echo "captcha_enabled=0\ncaptcha_secret_key=6LdoxOAqAAAAAGDUQcWSucEP7v8ibE6M17TvPzqx\ncaptcha_site_key=6LdoxOAqAAAAAEyrsvTSSPtoWutlInojb37CmDhc" > /home/frappe/frappe-bench/apps/frappe/.env
+  
+FROM base AS backend
+
+USER frappe
+
+COPY --from=builder --chown=frappe:frappe /home/frappe/frappe-bench /home/frappe/frappe-bench
+
+WORKDIR /home/frappe/frappe-bench
+
+VOLUME [ \
+  "/home/frappe/frappe-bench/sites", \
+  "/home/frappe/frappe-bench/apps", \
+  "/home/frappe/frappe-bench/env", \
+  "/home/frappe/frappe-bench/config", \
+  "/home/frappe/frappe-bench/sites/assets", \
+  "/home/frappe/frappe-bench/logs" \
+]
+
+CMD [ \
+  "env", \
+  "PYTHONPATH=/home/frappe/frappe-bench/apps", \
+  "/home/frappe/frappe-bench/env/bin/gunicorn", \
+  "--chdir=/home/frappe/frappe-bench/sites", \
+  "--bind=0.0.0.0:8000", \
+  "--threads=4", \
+  "--workers=5", \
+  "--worker-class=gthread", \
+  "--worker-tmp-dir=/dev/shm", \
+  "--timeout=120", \
+  "--preload", \
+  "frappe.app:application" \
+]
