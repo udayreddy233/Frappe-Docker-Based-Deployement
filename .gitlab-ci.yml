@@ -1,0 +1,74 @@
+##https://github.com/castlecraft/custom_containers/blob/main/.gitlab-ci.yml
+
+include: 
+  - project: 'devops/continuous-delivery/ci-templates'
+    file: '/Workflows/Frappe-Pipelines.gitlab-ci.yml'
+
+
+build_on_vm:
+  stage: build
+  image: docker.io/library/ubuntu:24.04
+  environment:
+    name: $DEPLOY_ENVIRONMENT
+
+  cache:
+    key: apt-cache
+    paths:
+      - /var/cache/apt/archives
+      - /var/lib/apt/lists
+
+  before_script:
+    - source ./ci/build.env
+    - apt update
+    - mkdir -p ~/.ssh
+    - apt install -y openssh-client
+    - echo "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+    - echo $SSH_PRIVATE_KEY | base64 -d > ~/.ssh/deploy_key
+    - chmod 600 ~/.ssh/deploy_key
+    - ssh -i ~/.ssh/deploy_key -o "StrictHostKeyChecking=no" $VM_USER@$SERVER_NAME "mkdir -p /home/$VM_USER/$DEPLOYMENT_NAME"
+    - scp -i ~/.ssh/deploy_key -r ./ci/* $VM_USER@$SERVER_NAME:/home/$VM_USER/$DEPLOYMENT_NAME/
+  script:
+    - |
+      ssh -tt -i ~/.ssh/deploy_key $VM_USER@$SERVER_NAME "
+        set -e
+        cd /home/$VM_USER/$DEPLOYMENT_NAME
+
+        echo '--- Building Docker image on VM ---'
+        docker build \
+          --build-arg FRAPPE_PATH=${FRAPPE_PATH:-${FRAPPE_REPO}} \
+          --build-arg APPS=${APPS} \
+          --build-arg FRAPPE_BRANCH=${FRAPPE_BRANCH:-${FRAPPE_VERSION}} \
+          --build-arg PYTHON_VERSION=${PYTHON_VERSION:-${PY_VERSION}} \
+          --build-arg NODE_VERSION=${NODE_VERSION:-${NODEJS_VERSION}} \
+          --build-arg VM_USER=${VM_USER} \
+          -t $DEPLOYMENT_NAME:$CI_COMMIT_SHA \
+          .
+        
+        echo '--- Build complete ---'
+      "
+
+
+deploy_to_vm:
+  stage: deploy
+  image: docker.io/library/ubuntu:24.04
+  environment:
+    name: $DEPLOY_ENVIRONMENT
+
+  cache:
+    key: apt-cache
+    paths:
+      - /var/cache/apt/archives
+      - /var/lib/apt/lists
+      
+  before_script:
+    - apt update
+    - mkdir -p ~/.ssh
+    - apt install openssh-client -y
+    - echo "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+    - echo $SSH_PRIVATE_KEY | base64 -d > ~/.ssh/deploy_key
+    - chmod 600 ~/.ssh/deploy_key
+    - ssh -i ~/.ssh/deploy_key -o "StrictHostKeyChecking=no" -o "PasswordAuthentication=no" $VM_USER@$SERVER_NAME
+  script:
+    - ssh -i ~/.ssh/deploy_key $VM_USER@$SERVER_NAME "source /home/$VM_USER/$DEPLOYMENT_NAME/build.env; export VM_USER='${VM_USER}'; export DEPLOYMENT_NAME=${DEPLOYMENT_NAME}; export CI_COMMIT_SHA='${CI_COMMIT_SHA}'; export DB_HOST='${DB_HOST}'; export DB_PORT='${DB_PORT}'; export DB_NAME='${DB_NAME}'; export DB_USER='${DB_USER}'; export DB_PASSWORD='${DB_PASSWORD}'; export ADMIN_PASSWORD='${ADMIN_PASSWORD}'; export DB_ROOT_USERNAME='${DB_ROOT_USERNAME}'; export DB_ROOT_PASSWORD='${DB_ROOT_PASSWORD}'; export SITE_NAME='${SITE_NAME}'; export SSH_KNOWN_HOSTS='${SSH_KNOWN_HOSTS}';  /usr/bin/bash /home/$VM_USER/$DEPLOYMENT_NAME/deploy.sh"
