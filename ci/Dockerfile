@@ -1,5 +1,5 @@
-#for mariadb deployments
-FROM public.ecr.aws/asakta/frappe-base:mariadb AS base
+#for postgres deployments
+FROM public.ecr.aws/asakta/frappe-base:postgres AS base
 
 FROM base AS builder
 

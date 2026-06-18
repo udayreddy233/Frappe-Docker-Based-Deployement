@@ -10,6 +10,16 @@ ENV PATH=${NVM_DIR}/versions/node/v${NODE_VERSION}/bin/:${PATH}
 RUN useradd -ms /bin/bash frappe \
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -qqy tzdata gpg wget \
+    && apt-get purge -y --auto-remove 'postgresql*' || true \
+    && wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] http://apt.postgresql.org/pub/repos/apt/ bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install --no-install-recommends -y postgresql-client-16 \
+    && rm -f /usr/bin/psql /usr/bin/pg_config \
+    && ln -s /usr/lib/postgresql/16/bin/psql /usr/bin/psql \
+    && ln -s /usr/lib/postgresql/16/bin/pg_config /usr/bin/pg_config \
+    && psql --version | grep -q "16\." || { echo "PostgreSQL 16 not active"; exit 1; } \
+    && pg_config --version | grep -q "16\." || { echo "pg_config not 16"; exit 1; } \
     && ln -fs /usr/share/zoneinfo/Asia/Calcutta /etc/localtime \
     && dpkg-reconfigure -f noninteractive tzdata \
     && pip install wheel -q \
@@ -20,7 +30,7 @@ RUN useradd -ms /bin/bash frappe \
     && apt-get install --no-install-recommends -qqy \
         curl git vim nginx gettext-base file \
         libpango-1.0-0 libharfbuzz0b libpangoft2-1.0-0 \
-        libpangocairo-1.0-0 restic gpg less mariadb-client \
+        libpangocairo-1.0-0 restic gpg less \
         wait-for-it jq \
     && mkdir -p ${NVM_DIR} \
     && chown -R frappe:frappe /home/frappe \
